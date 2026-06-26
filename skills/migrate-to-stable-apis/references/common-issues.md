@@ -150,3 +150,32 @@ extra_compile_args={
 ```
 
 The hex value encodes the version: `0x020b...` = PyTorch 2.11.
+
+### `Python.h` file not found during `run_transform.sh` (rewrite/audit)
+
+Happens in the **rewrite** (or audit) phase, not verify. `stable-abi-transform`
+uses libclang to parse each file's **current** legacy includes before rewriting.
+If a translation unit pulls in `torch/extension.h` or a `#ifndef
+PROJECT_DISABLE_PYBIND` pybind block, the preprocessor reaches
+`torch/csrc/python_headers.h`, which includes `<Python.h>`. The generated
+config only had project/CUDA/PyTorch include paths — not the Python dev headers
+— so clang fails with parse errors. The tool may still write **partial edits**
+before exiting non-zero.
+
+**Fix (automatic):** `gen_stable_abi_config.sh` now adds the active
+interpreter's `sysconfig.get_path('include')` to `include_paths`. Re-run
+`run_transform.sh` after ensuring `python3-dev` (or your venv's Python headers)
+is installed.
+
+**Fix (project-specific):** If pybind is already disabled in your stable build,
+pass the same `-D` the real target uses so clang skips dead pybind includes,
+e.g. add to `compiler_flags` in a hand-edited config:
+
+```yaml
+compiler_flags:
+  - -std=c++20
+  - -DUSE_CUDA
+  - -DQUTLASS_DISABLE_PYBIND=1
+```
+
+Or use `--config` with a hand-edited YAML when debugging a single file.

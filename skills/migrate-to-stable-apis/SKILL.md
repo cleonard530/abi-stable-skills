@@ -1,6 +1,6 @@
 ---
 name: migrate-to-stable-apis
-description: Rewrite unstable PyTorch C++/CUDA API calls to their `torch::stable` / `torch::headeronly` / `aoti_torch` equivalents and swap registration macros to `STABLE_TORCH_LIBRARY_*` with `TORCH_BOX`. Runs in two modes: **incremental** (file-by-file, after `scaffold-stable-target` set up a parallel target — each file's path flips from legacy `sources=` to stable `sources=` as it migrates) or **one-shot** (no parallel target — adds `TORCH_TARGET_VERSION` to the existing `ext_modules` entry and rewrites every in-scope file in one pass). Use after `pybind-to-torch-library`, `migrate-meta-fns-to-python`, and `migrate-autograd-fns-to-python` have run.
+description: Rewrite unstable PyTorch C++/CUDA API calls to their `torch::stable` / `torch::headeronly` / `aoti_torch` equivalents and swap registration macros to `STABLE_TORCH_LIBRARY_*` with `TORCH_BOX`. Optionally runs `stable-abi-transform` first for the mechanical pass (~86% of edits), then manual cleanup for flags, `TORCH_BOX`, build wiring, and verify. Falls back to the same manual-only workflow when the tool is unavailable. Runs in two modes: **incremental** (file-by-file, after `scaffold-stable-target` set up a parallel target — each file's path flips from legacy `sources=` to stable `sources=` as it migrates) or **one-shot** (no parallel target — adds `TORCH_TARGET_VERSION` to the existing `ext_modules` entry and rewrites every in-scope file in one pass). Use after `pybind-to-torch-library`, `migrate-meta-fns-to-python`, and `migrate-autograd-fns-to-python` have run.
 allowed-tools: Read, Bash, Edit, Write, Glob, Grep
 ---
 
@@ -18,7 +18,7 @@ The plan's `dispatch_order` (set by `assess-abi-migration` Step 7) determines wh
 
 **Incremental** (when `scaffold-stable-target` ran). A second `ext_modules` entry (stable, with `TORCH_TARGET_VERSION` flags) already exists alongside the legacy one. Both share the same `csrc/`. Files stay where they are on disk; each file is in exactly one entry's `sources=` at any time. Migrating a file = rewrite it in place + remove its path from the legacy `sources=` and add it to the stable `sources=`. Both `.so`'s load at import time and register into the same `torch.ops.<lib_namespace>` namespace (the dispatcher is fine with this because each op is compiled into only one `.so`). The legacy target keeps serving un-migrated ops throughout.
 
-**One-shot** (when `scaffold-stable-target` was skipped). There is no parallel target. This skill adds `TORCH_TARGET_VERSION` (and optionally `Py_LIMITED_API`) to the existing `ext_modules` entry, then rewrites every in-scope file's APIs + registration macros, then builds + tests the now-stable extension. No `sources=` flipping (there's nothing to flip between). The wheel built after this skill is the final stable wheel.
+**One-shot** (when `scaffold-stable-target` was skipped). There is no parallel target. This skill adds `TORCH_TARGET_VERSION` (and optionally `Py_LIMITED_API`) to the existing `ext_modules` entry, then rewrites every in-scope file's APIs + registration macros, then compile-verifies each file against stable headers. No `sources=` flipping (there's nothing to flip between). The wheel built after this skill is the final stable wheel.
 
 The rewrite work (steps 1–3 below) is identical in both modes. Step 4 (build target wiring) differs.
 
@@ -37,12 +37,62 @@ The rewrite work (steps 1–3 below) is identical in both modes. Step 4 (build t
 - Mode: derived from whether `scaffold-stable-target` appears in the plan's `dispatch_order`.
 - File list: the plan's `unstable-api` concern entries (incremental mode can also cross-check against the legacy `ext_modules` entry's `sources=`).
 - `lib_namespace`: the existing registration namespace (e.g., `extension_cpp`). Stays the same throughout the migration — do **not** suffix it with `_stable`.
+- `project_root` / `csrc_root`: from the migration plan JSON (required for helper scripts).
+
+## Optional tooling: stable-abi-transform
+
+When `stable-abi-transform` is available, run it **before** the manual rewrite steps. When it is not, skip straight to manual steps — behavior is identical to a migration without the tool.
+
+### Detection and config
+
+```bash
+TOOL="<repo>/pytorch-stable-abi-transform/build/stable-abi-transform"
+```
+
+Build the tool if missing (see below). **Do not reuse a stale `.stable-abi.yaml` from another project** (e.g. the sample under `pytorch-stable-abi-transform/build/`).
+
+**Generate a fresh config on every transform/verify run.** The helper scripts call `gen_stable_abi_config.sh`, which runs `stable-abi-transform --init-config` (see `pytorch-stable-abi-transform/docs/user-guide.md`), then patches `project_root`, `mode`, `include_paths`, and `extra_includes` for the current migration scope. The YAML is written to a temp file and deleted after the run.
+
+Pass `--config PATH` only when you intentionally want a hand-edited config (e.g. debugging a single file). Otherwise let the scripts generate one.
+
+Auto-detected `include_paths` cover: `csrc/`, `csrc/include/`, the repo root, vendored CUTLASS if present, and CUDA headers. Add project-specific paths with `--include-path` (repeatable) on `run_transform.sh` / `verify_closure.sh`.
+
+Use the helper scripts (they exit 0 with `SKIP:` only when the **tool binary** is missing):
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/gen_stable_abi_config.sh` | Fresh `.stable-abi.yaml` from `--init-config` + project paths |
+| `scripts/run_transform.sh` | `--mode=rewrite` on root translation unit(s) |
+| `scripts/verify_closure.sh` | `--mode=verify` on the same root(s) |
+
+Build the tool if missing:
+
+```bash
+cmake -GNinja -B <repo>/pytorch-stable-abi-transform/build \
+  -S <repo>/pytorch-stable-abi-transform
+ninja -C <repo>/pytorch-stable-abi-transform/build
+```
+
+### Work split (transform vs manual)
+
+| Owner | Typical work |
+|-------|----------------|
+| **`stable-abi-transform`** | Include swaps; `at::`/`c10::` → stable types; `TORCH_CHECK` → `STD_TORCH_CHECK`; `data_ptr` → `const_data_ptr`/`mutable_data_ptr`; method→free-fn; CUDA guard/stream; `TORCH_LIBRARY` → `STABLE_TORCH_LIBRARY` *macro text*; `AT_DISPATCH_*` → `THO_DISPATCH_*` |
+| **Manual (steps 1–3 below)** | `[FLAG]` resolution; `TensorOptions` decomposition; stable project dispatch macros; `TORCH_BOX(&fn)` on impls; `torch_bindings.cpp` / `ops.h`; CMake / `setup.py` wiring; shared infra headers; undo bad transform edits (e.g. stable includes inside `#ifndef TORCH_TARGET_VERSION`, or rewriting headers that never used torch APIs) |
+
+The tool rewrites each root translation unit and any project headers they `#include` (under `project_root` in the generated config). It does **not** wire the build, move schema defs, or add boxing — that is always manual.
+
+**When transform helps:** host-side `.cu`/`.cpp` with many `at::` calls (~15–30% of agent time saved on first pass).
+
+**When to skip transform:** device-only headers with no unstable torch APIs; pure CUDA kernel bodies; iterations 2+ of a retry loop; after transform broke a dual-path `#ifndef TORCH_TARGET_VERSION` block — fix manually instead.
+
+**When to re-run transform:** fresh file on first pass only; or after large manual edits reintroduced unstable patterns the tool knows (use `--dry-run` first).
 
 ## Workflow
 
-**Incremental mode**: plan chunk order first (step 0 below), then process one chunk at a time. After each chunk is fully migrated and both targets build + tests pass, commit and advance. Within a chunk, work file-by-file so failures stay localized; the chunk boundary is what gets committed.
+**Incremental mode**: plan chunk order first (step 0 below), then process one chunk at a time. After each chunk is fully migrated and compile-verify passes, commit and advance. Within a chunk, work file-by-file so failures stay localized; the chunk boundary is what gets committed.
 
-**One-shot mode**: rewrite every in-scope file in one pass (steps 1–3 below), then do step 4 once for the whole extension, then build + test once. The whole migration lands as a single change. Skip step 0.
+**One-shot mode**: rewrite every in-scope file in one pass (steps A–3 below), then do step 4 once for the whole extension, then compile-verify once. The whole migration lands as a single change. Skip step 0.
 
 ### 0. (Incremental mode) Plan chunk order before any rewrites
 
@@ -80,9 +130,45 @@ Surface this list to the user before starting any rewrites:
 
 After the user approves, save the chunk plan to the migration plan JSON under a `chunks` field so the orchestrator can resume mid-migration without re-planning.
 
-The per-chunk loop is steps 1–7 below — apply them to every file in the chunk, then build + test + commit + advance to the next chunk.
+The per-chunk loop is steps A–6 below — apply them to every file in the chunk, then compile-verify + commit + advance to the next chunk.
 
-### 1. Update includes
+Track **iteration** per chunk (start at 1). Cap at **5 iterations** across the A→6 loop. On iteration 2+, **skip step A** unless large manual edits reintroduced unstable patterns.
+
+### A. Mechanical rewrite (stable-abi-transform, optional)
+
+**Only on iteration 1** of each chunk (or each root file in a single-file migration).
+
+1. Resolve scope: the chunk's root translation units (`.cu`/`.cpp` entry points). Pass each root to the scripts below — Clang follows `#include` from each root, so headers do not need to be listed separately.
+2. Preview (recommended). The script generates a **fresh** `.stable-abi.yaml` via `stable-abi-transform --init-config` (temp file, deleted after the run). Pass `--csrc-root` when sources are not under `<project_root>/csrc`. Add external headers (CUTLASS, etc.) with `--include-path` (repeatable):
+
+   ```bash
+   .cursor/skills/migrate-to-stable-apis/scripts/run_transform.sh \
+     --dry-run \
+     --project-root <project_root> \
+     --csrc-root <csrc_root> \
+     [--include-path <cutlass_include>] \
+     <root-file>
+   ```
+
+3. Run the rewrite:
+
+   ```bash
+   .cursor/skills/migrate-to-stable-apis/scripts/run_transform.sh \
+     --project-root <project_root> \
+     --csrc-root <csrc_root> \
+     [--include-path <cutlass_include>] \
+     <root-file>
+   ```
+
+   If the script prints `SKIP:`, the tool binary is missing — build it (below) or continue with manual rewrites.
+
+4. If the tool exits non-zero, fix config/parse issues before continuing. Resolve any `[FLAG]` items using `references/api-mapping.md`, `references/common-issues.md`, and `pytorch-stable-abi-transform/docs/claude-skill.md`.
+
+   **Parse error `Python.h` file not found:** rewrite-phase only — see [common-issues.md § Python.h](references/common-issues.md). Ensure Python dev headers are installed; `gen_stable_abi_config.sh` adds them automatically. If pybind is `#ifdef`-disabled in your build, mirror that `-D` in `compiler_flags` via a hand-edited `--config`.
+
+**Do not** re-run transform on later iterations unless you deliberately reintroduced unstable patterns.
+
+### 1. Update includes (manual cleanup)
 
 Remove legacy includes and replace with the stable subset.
 
@@ -115,9 +201,9 @@ Allowed header roots (anything outside these will fail to compile under `TORCH_T
 - `torch/headeronly/`
 - `torch/csrc/inductor/aoti_torch/`
 
-### 2. Apply API replacements
+### 2. Apply API replacements (manual cleanup)
 
-Walk each file and apply the substitutions from [references/api-mapping.md](references/api-mapping.md). The most frequent ones:
+Walk each file and apply anything `stable-abi-transform` missed — or everything, if step A was skipped. Use [references/api-mapping.md](references/api-mapping.md). The most frequent ones:
 
 | Old | Stable |
 |---|---|
@@ -140,9 +226,9 @@ Walk each file and apply the substitutions from [references/api-mapping.md](refe
 
 See [api-mapping.md](references/api-mapping.md) for the full table, including strided tensor creation, layout checks, and scalar type enums.
 
-### 3. Swap registration macros to STABLE_*
+### 3. Swap registration macros to STABLE_* (manual cleanup)
 
-After this step, op registrations move from `TORCH_LIBRARY` (set up by `pybind-to-torch-library`) to the stable form:
+The transform rewrites `TORCH_LIBRARY` → `STABLE_TORCH_LIBRARY` macro **text** but does **not** add `TORCH_BOX`. After this step, op registrations move from `TORCH_LIBRARY` (set up by `pybind-to-torch-library`) to the stable form:
 
 ```cpp
 // Before:
@@ -210,26 +296,40 @@ Pick the hex from the plan's `target_torch_version` (`0xMMmm_0000_0000_0000` —
 
 Constraint: `2.9 ≤ TORCH_TARGET_VERSION ≤ <libtorch version at build time>`. Choose the lowest version the project is willing to support; lower = wider compatibility, higher = more APIs.
 
-### 5. Build and iterate
+### 5. Compile-verify against stable headers
 
-Run `build_cmd`. Both targets (incremental) or the single converted target (one-shot) must build successfully. Most failures fall into two buckets:
+After steps 1–4, compile the migrated file(s) against libtorch stable headers only — the same check `stable-abi-transform` performs in verify mode. This is the **only** build step during migration; do not run a full extension or wheel build here.
+
+```bash
+.cursor/skills/migrate-to-stable-apis/scripts/verify_closure.sh \
+  --project-root <project_root> \
+  --csrc-root <csrc_root> \
+  [--include-path <cutlass_include>] \
+  <root-file>
+```
+
+If the script prints `SKIP:`, the tool binary is missing — build it (see above) or review manually. If verify fails, fix with ABI-only changes and re-run verify before advancing.
+
+Most failures fall into two buckets:
 
 - **"Header not allowed" errors** — a legacy include slipped through the rewrite. Find and replace it. If the file genuinely needs an API with no stable equivalent, see [references/common-issues.md](references/common-issues.md) for workarounds, or stop and flag a blocker.
 - **Substitution misses** — an unstable API call or `TORCH_LIBRARY_IMPL` macro wasn't replaced. Apply the mapping.
 
 Common pitfalls are documented in [references/common-issues.md](references/common-issues.md): missing `-DUSE_CUDA`, undeclared `aoti_torch_get_current_cuda_stream`, layout check rewrites, and the `empty_strided` workaround.
 
-### 6. Test
+### 6. Advance or retry
 
-Run the project's existing test suite (`test_cmd` from the plan, or if that is too broad, look at the possible tests and only run those affecting the kernels we've migrated this chunk). Python-side registrations (fakes from `migrate-meta-fns-to-python`, autograd from `migrate-autograd-fns-to-python`) reference `torch.ops.<lib_namespace>.<op>` — that string is unchanged, so they keep working in both modes. When tests pass, prompt the user to make a commit.
+- If step 5 succeeds → advance (below) or finish.
+- If errors remain and iteration **< 5**: increment iteration, **skip step A**, repeat from step 1 using new verify output.
+- If iteration **≥ 5** or the **same error persists twice** in a row → stop and report: root file(s), last compile error, what was tried per iteration, and concrete next steps.
 
-In **incremental mode**, both `.so`'s load at import time; the migrated op now lives in `_C_stable.so` while everything else still resolves through `_C.so`. In **one-shot mode**, the single `.so` is now the stable one.
+When finishing a chunk or file, include a short **work split** line, e.g.:
 
-### 7. Advance
+> **Work split:** transform N edits; manual: [bindings, CMake, `TORCH_BOX`, flags, reverted transform mistakes]; verify: iteration K.
 
-**Incremental mode.** Pick the next chunk of files from the legacy `ext_modules` entry's `sources=` in `setup.py` and repeat from Step 1. Stop when the legacy entry's `sources=` is empty, then hand off to [scaffold-stable-target's Completion section](../scaffold-stable-target/SKILL.md#completion-run-by-migrate-to-stable-apis-after-the-last-file-migrates) for final cleanup (removing the legacy entry, optionally renaming the stable extension back to `_C`).
+**Incremental mode.** Pick the next chunk of files from the legacy `ext_modules` entry's `sources=` in `setup.py` and repeat from step A (iteration 1). Stop when the legacy entry's `sources=` is empty, then hand off to [scaffold-stable-target's Completion section](../scaffold-stable-target/SKILL.md#completion-run-by-migrate-to-stable-apis-after-the-last-file-migrates) for final cleanup (removing the legacy entry, optionally renaming the stable extension back to `_C`).
 
-**One-shot mode.** When all in-scope files are rewritten, the build is green, and tests pass — the migration is done. No further cleanup; the single existing `ext_modules` entry is now the stable wheel.
+**One-shot mode.** When all in-scope files are rewritten and compile-verify passes — the migration is done. No further cleanup; the single existing `ext_modules` entry is now the stable wheel.
 
 ## Critical rules
 
@@ -248,19 +348,23 @@ These are mistakes that AI-assisted migrations commonly make — follow strictly
 
 ## Verification
 
-Build with `build_cmd`. Run the project's existing tests with `test_cmd`. Then prove ABI stability empirically:
+During migration, run `verify_closure.sh` after each chunk (step 5). That syntax-checks each root translation unit against libtorch stable headers via `stable-abi-transform --mode=verify` (compile-based; this tool build has no `--verify-method` flag). Headers are checked through normal `#include` expansion — pass every root `.cu`/`.cpp` in the chunk, not individual headers.
+
+After the full migration is complete, the orchestrator (or the user) runs the project's full extension build and test suite separately — that is outside this skill's per-chunk loop.
+
+To prove ABI stability empirically after a full wheel build:
 
 ```bash
 # Build against torch X.Y
 pip install torch==X.Y
-<build_cmd>
+<project build command>
 
 # Then install a different torch minor and re-test without rebuilding the extension
 pip install torch==X.Z
-<test_cmd>
+<project test command>
 ```
 
-If the second `test_cmd` passes, the migration is verified.
+If the second test run passes, the migration is verified.
 
 ## Real-world references
 
@@ -268,7 +372,7 @@ If the second `test_cmd` passes, the migration is verified.
 - **API-rewrite reference:** [`pytorch/extension-cpp`](https://github.com/pytorch/extension-cpp) — contains `extension_cpp/` (legacy) and `extension_cpp_stable/` (stable) implementations of the same op. Useful as a side-by-side diff for the API changes themselves. Note its parallel-directory layout is for didactic clarity; this skill's migration model keeps both targets in one `csrc/`.
 - **Shared-namespace pattern:** [sglang's sgl-kernel](https://github.com/sgl-project/sglang/tree/main/sgl-kernel) — Python callers use `torch.ops.sgl_kernel.<op>` regardless of which `.so` implements the op. The `.so` filename is implementation detail.
 - **Real-world migration:** FlashAttention 3's [`flash_api.cpp`](https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_api.cpp) (legacy) vs [`flash_api_stable.cpp`](https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_api_stable.cpp) (stable). The diff is a concrete production-scale example of the API rewrite.
-- **Other adoptions:** xformers, torchaudio, torchao, vLLM (in progress).
+- **Other adoptions:** xformers, torchaudio, torchao, vLLM (in progress), torchvision (in progress).
 
 ## Handoff
 
