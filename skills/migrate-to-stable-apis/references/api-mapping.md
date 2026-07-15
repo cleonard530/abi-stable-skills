@@ -94,8 +94,10 @@ auto out = torch::stable::transpose(tmp, 0, 1);
 | `t.data_ptr<T>()` (read-only) | `t.const_data_ptr<T>()` |
 | `t.data_ptr<T>()` (read-write) | `t.mutable_data_ptr<T>()` |
 | `t.data_ptr<int32_t>()` (read-write) | `t.mutable_data_ptr<int32_t>()` |
-| `t.sizes()` | `t.size(i)` (per-element) |
-| `t.strides()` | `t.stride(i)` (per-element) |
+| `t.sizes()` | `t.sizes()` (returns `torch::headeronly::IntHeaderOnlyArrayRef`; compare with `x.sizes() == torch::headeronly::IntHeaderOnlyArrayRef({...})`) |
+| `t.strides()` | `t.strides()` (returns `torch::headeronly::IntHeaderOnlyArrayRef`; index with `t.strides()[i]` or `t.stride(i)`) |
+| `t.size(i)` | `t.size(i)` (unchanged) |
+| `t.stride(i)` | `t.stride(i)` (unchanged) |
 | `t.scalar_type()` | `t.scalar_type()` (same, but compare against `torch::headeronly::ScalarType`) |
 | `t.device()` | `t.device()` (returns `torch::stable::Device`; compare with `t.device().type() == torch::headeronly::DeviceType::CUDA`) |
 | `t.get_device_index()` | `t.get_device_index()` — use for `DeviceGuard` and CUDA stream lookup |
