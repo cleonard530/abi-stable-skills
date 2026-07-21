@@ -139,8 +139,9 @@ my_quantize(const Tensor& input, int64_t block_size,
         aoti_torch_get_current_cuda_stream(input.get_device_index(), &stream_ptr));
     cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
 
-    int64_t stride_0 = scales.stride(0);
-    int64_t stride_1 = scales.stride(1);
+    // Get strides
+    int64_t stride_0 = scales.strides()[0];
+    int64_t stride_1 = scales.strides()[1];
 
     // Launch kernel...
     launch_kernel(
