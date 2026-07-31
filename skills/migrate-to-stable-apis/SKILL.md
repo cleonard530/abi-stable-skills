@@ -270,10 +270,9 @@ If the audit is clean and the second `test_cmd` passes, the migration is verifie
 - **Official tutorial:** [Custom C++ and CUDA Operators](https://docs.pytorch.org/tutorials/advanced/cpp_custom_ops.html) — walks through the same migration end-to-end on a toy `mymuladd` op, with side-by-side ABI-stable vs non-stable tabs.
 - **API-rewrite reference:** [`pytorch/extension-cpp`](https://github.com/pytorch/extension-cpp) — contains `extension_cpp/` (legacy) and `extension_cpp_stable/` (stable) implementations of the same op. Useful as a side-by-side diff for the API changes themselves. Note its parallel-directory layout is for didactic clarity; this skill's migration model keeps both targets in one `csrc/`.
 - **Shared-namespace pattern:** [sglang's sgl-kernel](https://github.com/sgl-project/sglang/tree/main/sgl-kernel) — Python callers use `torch.ops.sgl_kernel.<op>` regardless of which `.so` implements the op. The `.so` filename is implementation detail.
-- **Real-world migration:** FlashAttention 3's [`flash_api.cpp`](https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_api.cpp) (legacy) vs [`flash_api_stable.cpp`](https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_api_stable.cpp) (stable) — a production-scale example of the **API rewrite** (`at::` → `torch::stable::`, schema strings, `Tensor(out!)?` annotations).
-
-  ⚠️ **Don't copy FA3's op registration.** It hand-writes boxed kernels (`boxed_mha_fwd(StableIValue* stack, …)`) — you don't need to. Register with `TORCH_BOX(&fn)` (Step 3 / critical rule 5).
-- **Other adoptions:** xformers, torchaudio, torchao, vLLM (in progress).
+- **Real-world migration — [`janeyx99/FlashMLA-ABI-Stable`](https://github.com/janeyx99/FlashMLA-ABI-Stable)** (fork of [DeepSeek's FlashMLA](https://github.com/deepseek-ai/FlashMLA)): a production kernel library migrated end-to-end with these skills. Its two migration commits map onto the skill order:
+  - [`b63b146`](https://github.com/janeyx99/FlashMLA-ABI-Stable/commit/b63b1461825471b948dee02cecb094c1807ba8c6) — pybind11 → `TORCH_LIBRARY` + CPython-agnostic (`Py_LIMITED_API`/`abi3`) build. That's [pybind-to-torch-library](../pybind-to-torch-library/SKILL.md).
+  - [`ac69fd9`](https://github.com/janeyx99/FlashMLA-ABI-Stable/commit/ac69fd9c5346c6f5aa63263e48ddafcdd7b4057d) — `at::`/`c10::` → `torch::stable::`, one-shot mode. That's this skill.
 
 ## Handoff
 

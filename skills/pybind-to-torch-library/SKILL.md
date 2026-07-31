@@ -221,6 +221,14 @@ If the project still has any direct CPython API usage (rare, since pybind was th
 4. **Mutable args (`Tensor(a!)`)** — if any pybind function mutates inputs in place, that needs to be reflected in the schema with alias annotations. Don't guess; flag for the user. Remember, honesty and minimality!
 5. **Variadic / `*args` Python signatures** are not expressible in schemas. Refactor to fixed argument lists.
 
+## Real-world reference
+
+[`janeyx99/FlashMLA-ABI-Stable@b63b146`](https://github.com/janeyx99/FlashMLA-ABI-Stable/commit/b63b1461825471b948dee02cecb094c1807ba8c6) — this exact step on DeepSeek's FlashMLA. Worth reading for:
+
+- `PYBIND11_MODULE` → `TORCH_LIBRARY` schemas + `TORCH_LIBRARY_IMPL(flash_mla, CUDA, m)` in `csrc/api/api.cpp`, with the C++ signatures untouched (critical rule 6).
+- The Python side (Step 4/5): in `__init__.py`, the interface module does `flash_mla_cuda = torch.ops.flash_mla` — aliasing the op namespace to the old pybind module name so every old call site stays unchanged.
+- `py_limited_api=True` + `options={"bdist_wheel": {"py_limited_api": "cp310"}}` in `setup.py` (Step 7).
+
 ## Verification
 
 After conversion:

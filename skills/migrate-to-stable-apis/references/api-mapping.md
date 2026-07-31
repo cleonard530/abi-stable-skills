@@ -163,6 +163,28 @@ from `torch::stable::accelerator::getCurrentDeviceIndex()`.
 it from `torch/csrc/inductor/aoti_torch/c/shim.h`. Also include `<cuda_runtime.h>`
 for `cudaStream_t`.
 
+If more than one call site need the stream, put the three lines in a shared
+helper header (e.g. `get_current_cuda_stream(tensor)`) instead of inlining them
+everywhere — it keeps the diff small and the error handling consistent. Example:
+[`kerutils/supplemental/cuda_stream.h`](https://github.com/janeyx99/FlashMLA-ABI-Stable/blob/main/csrc/kerutils/include/kerutils/supplemental/cuda_stream.h).
+
+### CUDA Device Properties
+
+| Old | Stable ABI |
+|-----|-----------|
+| `at::cuda::getCurrentDeviceProperties()` | No shim — see below |
+
+There is no stable shim for device properties. Copy
+[`get_cached_device_prop()`](https://github.com/janeyx99/FlashMLA-ABI-Stable/blob/main/csrc/api/common.h)
+from FlashMLA's `csrc/api/common.h`: it takes the device index from
+`torch::stable::accelerator::getCurrentDeviceIndex()`, queries the CUDA Runtime, and caches
+the result per device index behind `std::call_once`.
+
+Don't hand-roll it. `cudaGetDeviceProperties` is a blocking runtime query that fills a
+large struct, so calling it per kernel launch is a real regression — it
+has to be cached. Put the helper in one header and include
+it everywhere rather than caching per translation unit.
+
 ### CUDA Kernel Launch Check
 
 | Old | Stable ABI |
