@@ -139,9 +139,9 @@ my_quantize(const Tensor& input, int64_t block_size,
         aoti_torch_get_current_cuda_stream(input.get_device_index(), &stream_ptr));
     cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
 
-    // Use .stride(i) instead of .strides()[i]
-    int64_t stride_0 = scales.stride(0);
-    int64_t stride_1 = scales.stride(1);
+    // Get strides
+    int64_t stride_0 = scales.strides()[0];
+    int64_t stride_1 = scales.strides()[1];
 
     // Launch kernel...
     launch_kernel(
@@ -172,6 +172,5 @@ STABLE_TORCH_LIBRARY_IMPL(mylib, CUDA, m) {
 7. **Zeros**: `at::zeros({}, options)` -> `torch::stable::new_zeros(ref, {}, dtype)`
 8. **CUDA stream**: `at::cuda::getCurrentCUDAStream()` -> `aoti_torch_get_current_cuda_stream(idx, &ptr)`
 9. **Scalar types**: `at::kFloat` -> `torch::headeronly::ScalarType::Float`
-10. **Strides/sizes**: `.strides()` -> `.stride(i)`, `.sizes()` -> `.size(i)`
-11. **Data pointers**: `.data_ptr<T>()` (read) -> `.const_data_ptr<T>()`
-12. **Library reg**: `TORCH_LIBRARY_IMPL` -> `STABLE_TORCH_LIBRARY_IMPL` + `TORCH_BOX`
+10. **Data pointers**: `.data_ptr<T>()` (read) -> `.const_data_ptr<T>()`
+11. **Library reg**: `TORCH_LIBRARY_IMPL` -> `STABLE_TORCH_LIBRARY_IMPL` + `TORCH_BOX`

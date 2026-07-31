@@ -129,7 +129,6 @@ Walk each file and apply the substitutions from [references/api-mapping.md](refe
 | `t.contiguous()` | `torch::stable::contiguous(t)` |
 | `t.data_ptr<T>()` (read) | `t.const_data_ptr<T>()` |
 | `t.data_ptr<T>()` (write) | `t.mutable_data_ptr<T>()` |
-| `t.sizes()` / `t.strides()` | `t.size(i)` / `t.stride(i)` (per-element) |
 | `at::kFloat` | `torch::headeronly::ScalarType::Float` |
 | `at::kCUDA` | `torch::headeronly::kCUDA` |
 | `tensor.device() == kCUDA` | `tensor.device().type() == torch::headeronly::kCUDA` |
